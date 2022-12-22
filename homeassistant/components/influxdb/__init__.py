@@ -170,7 +170,7 @@ _INFLUX_BASE_SCHEMA = INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA.extend(
         vol.Optional(CONF_RETRY_COUNT, default=0): cv.positive_int,
         vol.Optional(CONF_DEFAULT_MEASUREMENT): cv.string,
         vol.Optional(CONF_MEASUREMENT_ATTR, default=DEFAULT_MEASUREMENT_ATTR): vol.In(
-            ["unit_of_measurement", "domain__device_class", "entity_id"]
+            ["unit_of_measurement", "domain", "domain__device_class", "entity_id"]
         ),
         vol.Optional(CONF_OVERRIDE_MEASUREMENT): cv.string,
         vol.Optional(CONF_TAGS, default={}): vol.Schema({cv.string: cv.string}),
@@ -251,6 +251,8 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
             else:
                 if measurement_attr == "entity_id":
                     measurement = state.entity_id
+                elif measurement_attr == "domain":
+                    measurement = state.domain
                 elif measurement_attr == "domain__device_class":
                     device_class = state.attributes.get("device_class")
                     if device_class is None:
@@ -278,6 +280,8 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
             INFLUX_CONF_TIME: event.time_fired,
             INFLUX_CONF_FIELDS: {},
         }
+        if measurement_attr == "domain":
+            del json[INFLUX_CONF_TAGS][CONF_DOMAIN]
         if _include_state:
             json[INFLUX_CONF_FIELDS][INFLUX_CONF_STATE] = state.state
         if _include_value:
