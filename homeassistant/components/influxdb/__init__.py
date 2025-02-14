@@ -7,6 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 import logging
 import math
+from pprint import pformat
 import queue
 import threading
 import time
@@ -41,10 +42,14 @@ from homeassistant.const import (
 )
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import (
+    area_registry as ar,
     config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
     event as event_helper,
     state as state_helper,
 )
+from homeassistant.helpers.entity import entity_sources
 from homeassistant.helpers.entity_values import EntityValues
 from homeassistant.helpers.entityfilter import (
     INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA,
@@ -107,6 +112,30 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def get_area_id_for_entity(entity, device) -> str:
+    """Return the area ID for a given entity_id."""
+
+    if entity.area_id:
+        return entity.area_id
+    # If entity has a device ID, return the area ID for the device
+    if device:
+        return device.area_id
+
+    return "undefined"
+
+
+def get_labels_for_entity(entity, device) -> set:
+    """Return the labels of the entity_id or the device of the entity_id if the entity_id does not have labels."""
+
+    if len(entity.labels) > 0:
+        return entity.labels
+    if device:
+        if len(device.labels) > 0:
+            return device.labels
+
+    return set()
 
 
 def create_influx_url(conf: dict) -> dict:
@@ -204,7 +233,9 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
-def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | None]:
+def _generate_event_to_json(
+    hass: HomeAssistant, conf: dict
+) -> Callable[[Event], dict[str, Any] | None]:
     """Build event to json converter and add to config."""
     entity_filter = convert_include_exclude_filter(conf)
     tags = conf.get(CONF_TAGS)
@@ -320,6 +351,115 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
                 with suppress(KeyError, TypeError):
                     if not math.isfinite(json[INFLUX_CONF_FIELDS][key]):
                         del json[INFLUX_CONF_FIELDS][key]
+
+        info = entity_sources(hass).get(state.entity_id)
+        if info is not None:
+            # Exclude states by integration that can either be calculated again
+            # by InfluxDB or that otherwise seem not worth storing.
+            # Exclude all states by:
+            # * https://www.home-assistant.io/integrations/derivative/
+            # * https://www.home-assistant.io/integrations/min_max/
+            # * https://www.home-assistant.io/integrations/statistics/
+            # * https://www.home-assistant.io/integrations/template/
+            # * https://www.home-assistant.io/integrations/threshold/
+            # * https://www.home-assistant.io/integrations/trend/
+            # because they are just derived states.
+            # Exclude all states by:
+            # * https://www.home-assistant.io/integrations/random/
+            # because they don’t seem useful.
+            if info.get("domain") in [
+                "derivative",
+                "min_max",
+                "statistics",
+                "template",
+                "threshold",
+                "trend",
+                "random",
+            ]:
+                _LOGGER.debug("Skip: %s: %s", state.entity_id, info)
+                return None
+
+            # https://www.home-assistant.io/docs/glossary/#domain
+            json[INFLUX_CONF_TAGS]["integration"] = info.get("domain", "undefined")
+
+        ent_reg = er.async_get(hass)
+        # Set "undefined" if a tag does not have a value.
+        # This comes in handy to define the tag as variable in Grafana and also
+        # be able to select based if the tag is "null".
+        if entity := ent_reg.async_get(state.entity_id):
+            if entity.unique_id:
+                json[INFLUX_CONF_TAGS]["unique_id"] = entity.unique_id
+            else:
+                json[INFLUX_CONF_TAGS]["unique_id"] = "undefined"
+            if entity.entity_category:
+                json[INFLUX_CONF_TAGS]["entity_category"] = entity.entity_category
+            else:
+                json[INFLUX_CONF_TAGS]["entity_category"] = "undefined"
+
+            dev_reg = dr.async_get(hass)
+            device = dev_reg.async_get(entity.device_id)
+            if device:
+                json[INFLUX_CONF_TAGS]["device_id"] = device.id
+            else:
+                json[INFLUX_CONF_TAGS]["device_id"] = "undefined"
+
+            area_id = get_area_id_for_entity(entity, device)
+            json[INFLUX_CONF_TAGS]["area_id"] = area_id
+            area_reg = ar.async_get(hass)
+            if area_id != "undefined" and (area := area_reg.async_get_area(area_id)):
+                if area.floor_id:
+                    json[INFLUX_CONF_TAGS]["floor_id"] = area.floor_id
+                else:
+                    json[INFLUX_CONF_TAGS]["floor_id"] = "undefined"
+
+            # https://github.com/elastic/ecs/issues/268
+            labels = get_labels_for_entity(entity, device)
+            env_labels = list(labels.intersection(["prod", "test"]))
+            if len(env_labels) > 0:
+                if len(env_labels) == 1:
+                    json[INFLUX_CONF_TAGS]["environment_id"] = env_labels[0]
+                else:
+                    _LOGGER.warning(
+                        "%s has multiple environment labels: %s",
+                        state.entity_id,
+                        sorted(env_labels),
+                    )
+                    json[INFLUX_CONF_TAGS]["environment_id"] = "test"
+            else:
+                json[INFLUX_CONF_TAGS]["environment_id"] = "test"
+
+            height_labels = [label for label in labels if label.startswith("height_")]
+            if len(height_labels) > 0:
+                if len(height_labels) == 1:
+                    height = height_labels[0].removeprefix("height_")
+                    # Only use unit meter. No cm or other units to make sorting works.
+                    height = height.replace("_", ".")  # "1.2m" -> "1.2m"
+                    json[INFLUX_CONF_TAGS]["height"] = height
+                else:
+                    _LOGGER.warning(
+                        "%s has multiple height labels: %s",
+                        state.entity_id,
+                        sorted(height_labels),
+                    )
+                    json[INFLUX_CONF_TAGS]["height"] = "undefined"
+            else:
+                json[INFLUX_CONF_TAGS]["height"] = "undefined"
+
+            subarea_labels = [label for label in labels if label.startswith("subarea_")]
+            if len(subarea_labels) > 0:
+                if len(subarea_labels) == 1:
+                    json[INFLUX_CONF_TAGS]["subarea_id"] = subarea_labels[
+                        0
+                    ].removeprefix("subarea_")
+                else:
+                    _LOGGER.warning(
+                        "%s has multiple subarea labels: %s",
+                        state.entity_id,
+                        sorted(subarea_labels),
+                    )
+                    json[INFLUX_CONF_TAGS]["subarea_id"] = "undefined"
+            else:
+                json[INFLUX_CONF_TAGS]["subarea_id"] = "undefined"
 
         json[INFLUX_CONF_TAGS].update(tags)
 
@@ -498,7 +638,7 @@ def setup(hass: HomeAssistant, config: ConfigType) -> bool:
         )
         return True
 
-    event_to_json = _generate_event_to_json(conf)
+    event_to_json = _generate_event_to_json(hass, conf)
     max_tries = conf.get(CONF_RETRY_COUNT)
     instance = hass.data[DOMAIN] = InfluxThread(hass, influx, event_to_json, max_tries)
     instance.start()
@@ -585,7 +725,9 @@ class InfluxThread(threading.Thread):
                     _LOGGER.error(RESUMED_MESSAGE, self.write_errors)
                     self.write_errors = 0
 
-                _LOGGER.debug(WROTE_MESSAGE, len(json))
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    _LOGGER.debug(WROTE_MESSAGE, len(json))
+                    _LOGGER.debug(pformat(json))
                 break
             except ValueError as err:
                 _LOGGER.error(err)
