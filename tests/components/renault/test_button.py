@@ -8,12 +8,13 @@ from renault_api.kamereon import schemas
 from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN, SERVICE_PRESS
+from homeassistant.components.renault.const import DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from tests.common import load_fixture, snapshot_platform
+from tests.common import async_load_fixture, snapshot_platform
 
 pytestmark = pytest.mark.usefixtures("patch_renault_account", "patch_get_vehicles")
 
@@ -109,14 +110,14 @@ async def test_button_start_charge(
     await hass.async_block_till_done()
 
     data = {
-        ATTR_ENTITY_ID: "button.reg_number_start_charge",
+        ATTR_ENTITY_ID: "button.reg_zoe_40_start_charge",
     }
 
     with patch(
         "renault_api.renault_vehicle.RenaultVehicle.set_charge_start",
         return_value=(
             schemas.KamereonVehicleHvacStartActionDataSchema.loads(
-                load_fixture("renault/action.set_charge_start.json")
+                await async_load_fixture(hass, "action.set_charge_start.json", DOMAIN)
             )
         ),
     ) as mock_action:
@@ -137,14 +138,14 @@ async def test_button_stop_charge(
     await hass.async_block_till_done()
 
     data = {
-        ATTR_ENTITY_ID: "button.reg_number_stop_charge",
+        ATTR_ENTITY_ID: "button.reg_zoe_40_stop_charge",
     }
 
     with patch(
         "renault_api.renault_vehicle.RenaultVehicle.set_charge_stop",
         return_value=(
             schemas.KamereonVehicleChargingStartActionDataSchema.loads(
-                load_fixture("renault/action.set_charge_stop.json")
+                await async_load_fixture(hass, "action.set_charge_stop.json", DOMAIN)
             )
         ),
     ) as mock_action:
@@ -165,14 +166,14 @@ async def test_button_start_air_conditioner(
     await hass.async_block_till_done()
 
     data = {
-        ATTR_ENTITY_ID: "button.reg_number_start_air_conditioner",
+        ATTR_ENTITY_ID: "button.reg_zoe_40_start_air_conditioner",
     }
 
     with patch(
         "renault_api.renault_vehicle.RenaultVehicle.set_ac_start",
         return_value=(
             schemas.KamereonVehicleHvacStartActionDataSchema.loads(
-                load_fixture("renault/action.set_ac_start.json")
+                await async_load_fixture(hass, "action.set_ac_start.json", DOMAIN)
             )
         ),
     ) as mock_action:
